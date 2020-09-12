@@ -9,6 +9,7 @@ import static org.mastodon.app.MastodonIcons.TRACKSCHEME_VIEW_ICON;
 import java.awt.event.WindowEvent;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -377,6 +378,19 @@ public class WindowManager
 		return null;
 	}
 
+	public MamutViewTable createTable( final Map< String, Object > guiState )
+	{
+		if ( appModel != null )
+		{
+			final MamutViewTable view = new MamutViewTable( appModel, guiState );
+			view.getFrame().setIconImage( TABLE_VIEW_ICON );
+			addTableWindow( view );
+			return view;
+		}
+		return null;
+
+	}
+
 	/**
 	 * Creates, shows and registers a new table view.
 	 *
@@ -389,14 +403,9 @@ public class WindowManager
 	 */
 	public MamutViewTable createTable( final boolean selectionOnly )
 	{
-		if ( appModel != null )
-		{
-			final MamutViewTable view = new MamutViewTable( appModel, selectionOnly );
-			view.getFrame().setIconImage( TABLE_VIEW_ICON );
-			addTableWindow( view );
-			return view;
-		}
-		return null;
+		final Map< String, Object > guiState = Collections.singletonMap(
+				MamutViewStateSerialization.TABLE_SELECTION_ONLY, Boolean.valueOf( selectionOnly ) );
+		return createTable( guiState );
 	}
 
 	public void editTagSets()
