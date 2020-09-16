@@ -2,7 +2,22 @@ package org.mastodon.mamut;
 
 import static org.mastodon.app.ui.ViewMenuBuilder.item;
 import static org.mastodon.app.ui.ViewMenuBuilder.separator;
+import static org.mastodon.mamut.MamutViewStateSerialization.FEATURE_COLOR_MODE_KEY;
+import static org.mastodon.mamut.MamutViewStateSerialization.FRAME_POSITION_KEY;
+import static org.mastodon.mamut.MamutViewStateSerialization.GROUP_HANDLE_ID_KEY;
+import static org.mastodon.mamut.MamutViewStateSerialization.NO_COLORING_KEY;
+import static org.mastodon.mamut.MamutViewStateSerialization.SETTINGS_PANEL_VISIBLE_KEY;
+import static org.mastodon.mamut.MamutViewStateSerialization.TABLE_DISPLAYING_VERTEX_TABLE;
+import static org.mastodon.mamut.MamutViewStateSerialization.TABLE_EDGE_TABLE_VISIBLE_POS;
+import static org.mastodon.mamut.MamutViewStateSerialization.TABLE_SELECTION_ONLY;
+import static org.mastodon.mamut.MamutViewStateSerialization.TABLE_VERTEX_TABLE_VISIBLE_POS;
+import static org.mastodon.mamut.MamutViewStateSerialization.TAG_SET_KEY;
 
+import java.awt.Point;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import javax.swing.ActionMap;
@@ -14,14 +29,23 @@ import org.mastodon.app.ui.ViewFrame;
 import org.mastodon.app.ui.ViewMenu;
 import org.mastodon.app.ui.ViewMenuBuilder.JMenuHandle;
 import org.mastodon.feature.FeatureModel;
+import org.mastodon.graph.GraphChangeListener;
 import org.mastodon.mamut.model.Link;
 import org.mastodon.mamut.model.Model;
+import org.mastodon.mamut.model.ModelGraph;
 import org.mastodon.mamut.model.Spot;
+import org.mastodon.mamut.model.SpotPool;
+import org.mastodon.model.SelectionListener;
+import org.mastodon.model.SelectionModel;
 import org.mastodon.model.tag.TagSetModel;
+import org.mastodon.model.tag.TagSetStructure.TagSet;
 import org.mastodon.ui.SelectionActions;
+import org.mastodon.ui.coloring.ColoringModel;
 import org.mastodon.ui.coloring.GraphColorGeneratorAdapter;
+import org.mastodon.ui.coloring.feature.FeatureColorMode;
 import org.mastodon.ui.keymap.KeyConfigContexts;
 import org.mastodon.views.context.ContextChooser;
+import org.mastodon.views.table.FeatureTagTablePanel;
 import org.mastodon.views.table.TableViewActions;
 import org.mastodon.views.table.TableViewFrame;
 
@@ -30,10 +54,20 @@ public class MamutViewTable extends MamutView< ViewGraph< Spot, Link, Spot, Link
 
 	private static final String[] CONTEXTS = new String[] { KeyConfigContexts.TABLE };
 
-	public MamutViewTable( final MamutAppModel appModel )
+	private final ColoringModel coloringModel;
 
+	private final boolean selectionOnly;
+
+	public MamutViewTable( final MamutAppModel appModel, final boolean selectionOnly )
+	{
+		this( appModel, Collections.singletonMap(
+				TABLE_SELECTION_ONLY, Boolean.valueOf( selectionOnly ) ) );
+	}
+
+	public MamutViewTable( final MamutAppModel appModel, final Map< String, Object > guiState )
 	{
 		super( appModel, IdentityViewGraph.wrap( appModel.getModel().getGraph(), appModel.getModel().getGraphIdBimap() ), CONTEXTS );
+		this.selectionOnly = ( boolean ) guiState.getOrDefault( TABLE_SELECTION_ONLY, false );
 
 		final GraphColorGeneratorAdapter< Spot, Link, Spot, Link > coloring = new GraphColorGeneratorAdapter<>( viewGraph.getVertexMap(), viewGraph.getEdgeMap() );
 
@@ -60,7 +94,31 @@ public class MamutViewTable extends MamutView< ViewGraph< Spot, Link, Spot, Link
 				navigationHandler,
 				appModel.getModel(),
 				coloring );
+
 		setFrame( frame );
+
+		// Restore position.
+		final int[] pos = ( int[] ) guiState.get( FRAME_POSITION_KEY );
+		if ( null != pos )
+			frame.setBounds( pos[ 0 ], pos[ 1 ], pos[ 2 ], pos[ 3 ] );
+		else
+		{
+			frame.setSize( 400, 400 );
+			frame.setLocationRelativeTo( null );
+		}
+		// Restore group handle.
+		final Integer groupID = ( Integer ) guiState.get( GROUP_HANDLE_ID_KEY );
+		if ( null != groupID )
+			groupHandle.setGroupId( groupID.intValue() );
+
+		// Restore settings panel visibility.
+		final Boolean settingsPanelVisible = ( Boolean ) guiState.get( SETTINGS_PANEL_VISIBLE_KEY );
+		if ( null != settingsPanelVisible )
+			frame.setSettingsPanelVisible( settingsPanelVisible.booleanValue() );
+
+		/*
+		 * Deal with actions.
+		 */
 
 		final Model model = appModel.getModel();
 		final FeatureModel featureModel = model.getFeatureModel();
@@ -95,8 +153,7 @@ public class MamutViewTable extends MamutView< ViewGraph< Spot, Link, Spot, Link
 				MamutMenuBuilder.viewMenu(
 						MamutMenuBuilder.colorMenu( menuHandle ),
 						separator(),
-						item( MastodonFrameViewActions.TOGGLE_SETTINGS_PANEL )
-						),
+						item( MastodonFrameViewActions.TOGGLE_SETTINGS_PANEL ) ),
 				MamutMenuBuilder.editMenu(
 						item( TableViewActions.EDIT_LABEL ),
 						item( TableViewActions.TOGGLE_TAG ),
@@ -104,13 +161,118 @@ public class MamutViewTable extends MamutView< ViewGraph< Spot, Link, Spot, Link
 						item( SelectionActions.DELETE_SELECTION ) ) );
 		appModel.getPlugins().addMenus( menu );
 
-		registerColoring( coloring, menuHandle, () -> {
+		coloringModel = registerColoring( coloring, menuHandle, () -> {
 			frame.getEdgeTable().repaint();
 			frame.getVertexTable().repaint();
 		} );
 
-		frame.setSize( 400, 400 );
+		// Restore coloring.
+		final Boolean noColoring = ( Boolean ) guiState.get( NO_COLORING_KEY );
+		if ( null != noColoring && noColoring )
+		{
+			coloringModel.colorByNone();
+		}
+		else
+		{
+			final String tagSetName = ( String ) guiState.get( TAG_SET_KEY );
+			final String featureColorModeName = ( String ) guiState.get( FEATURE_COLOR_MODE_KEY );
+			if ( null != tagSetName )
+			{
+				for ( final TagSet tagSet : coloringModel.getTagSetStructure().getTagSets() )
+				{
+					if ( tagSet.getName().equals( tagSetName ) )
+					{
+						coloringModel.colorByTagSet( tagSet );
+						break;
+					}
+				}
+			}
+			else if ( null != featureColorModeName )
+			{
+				final List< FeatureColorMode > featureColorModes = new ArrayList<>();
+				featureColorModes.addAll( coloringModel.getFeatureColorModeManager().getBuiltinStyles() );
+				featureColorModes.addAll( coloringModel.getFeatureColorModeManager().getUserStyles() );
+				for ( final FeatureColorMode featureColorMode : featureColorModes )
+				{
+					if ( featureColorMode.getName().equals( featureColorModeName ) )
+					{
+						coloringModel.colorByFeature( featureColorMode );
+						break;
+					}
+				}
+			}
+		}
+
+		/*
+		 * Deal with content.
+		 */
+
+		final FeatureTagTablePanel< Spot > vertexTable = frame.getVertexTable();
+		final FeatureTagTablePanel< Link > edgeTable = frame.getEdgeTable();
+		final SelectionModel< Spot, Link > selectionModel = appModel.getSelectionModel();
+
+		if ( selectionOnly )
+		{
+			// Pass only the selection.
+			frame.setTitle( "Selection table" );
+			frame.setMirrorSelection( false );
+			final SelectionListener selectionListener = () -> {
+				vertexTable.setRows( selectionModel.getSelectedVertices() );
+				edgeTable.setRows( selectionModel.getSelectedEdges() );
+			};
+			selectionModel.listeners().add( selectionListener );
+			selectionListener.selectionChanged();
+			onClose( () -> selectionModel.listeners().remove( selectionListener ) );
+		}
+		else
+		{
+			// Pass and listen to the full graph.
+			final ModelGraph graph = appModel.getModel().getGraph();
+			final GraphChangeListener graphChangeListener = () -> {
+				vertexTable.setRows( graph.vertices() );
+				edgeTable.setRows( graph.edges() );
+			};
+			graph.addGraphChangeListener( graphChangeListener );
+			graphChangeListener.graphChanged();
+			onClose( () -> graph.removeGraphChangeListener( graphChangeListener ) );
+
+			// Listen to selection changes.
+			frame.setMirrorSelection( true );
+			selectionModel.listeners().add( frame );
+			frame.selectionChanged();
+			onClose( () -> selectionModel.listeners().remove( frame ) );
+		}
+		/*
+		 * Register a listener to vertex label property changes, will update the
+		 * table-view when the label change.
+		 */
+		final SpotPool spotPool = ( SpotPool ) appModel.getModel().getGraph().vertices().getRefPool();
+		spotPool.labelProperty().addPropertyChangeListener( v -> frame.repaint() );
+
+		/*
+		 * Show table.
+		 */
+
 		frame.setVisible( true );
+
+		/*
+		 * Restore table visible rectangle and displayed table.
+		 */
+
+		final boolean displayingVertexTable = ( boolean ) guiState.getOrDefault( TABLE_DISPLAYING_VERTEX_TABLE, Boolean.TRUE );
+		frame.switchToVertexTable( displayingVertexTable );
+
+		final int[] visibleRectVertexTable = ( int[] ) guiState.get( TABLE_VERTEX_TABLE_VISIBLE_POS );
+		if ( null != visibleRectVertexTable )
+			frame.getVertexTable().getScrollPane().getViewport().setViewPosition( new Point( 
+					visibleRectVertexTable[ 0 ],
+					visibleRectVertexTable[ 1 ] ) );
+
+		final int[] visibleRectEdgeTable = ( int[] ) guiState.get( TABLE_EDGE_TABLE_VISIBLE_POS );
+		if ( null != visibleRectEdgeTable )
+			frame.getEdgeTable().getScrollPane().getViewport().setViewPosition( new Point( 
+					visibleRectEdgeTable[ 0 ],
+					visibleRectEdgeTable[ 1 ] ) );
 	}
 
 	@Override
@@ -125,5 +287,15 @@ public class MamutViewTable extends MamutView< ViewGraph< Spot, Link, Spot, Link
 	public ContextChooser< Spot > getContextChooser()
 	{
 		return getFrame().getContextChooser();
+	}
+
+	public ColoringModel getColoringModel()
+	{
+		return coloringModel;
+	}
+
+	public boolean isSelectionTable()
+	{
+		return selectionOnly;
 	}
 }
